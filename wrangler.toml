@@ -6,6 +6,7 @@ keep_vars = true
 
 
 kv_namespaces = [
-  { binding = "KV", id = "766d6ae4aa5441e3be2991e9ceb6bb45" }
+  { binding = "KV", id = "8800e3aa211940ff88f4297caf79e5d0" }
 ]
+
 
