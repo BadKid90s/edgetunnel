@@ -2642,7 +2642,7 @@ function 创建下行Grain发送器(webSocket, headerData = null) {
 	};
 }
 
-async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
+async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, 流量计数器 = null) {
 	let header = headerData, hasData = false, reader, useBYOB = false;
 	const BYOB单次读取上限 = 64 * 1024;
 	const 下行发送器 = 创建下行Grain发送器(webSocket, header);
@@ -2658,6 +2658,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 				if (done) break;
 				if (!value || value.byteLength === 0) continue;
 				hasData = true;
+				if (流量计数器) 流量计数器.下行 += value.byteLength;
 				await 下行发送器.发送(value);
 			}
 		} else {
@@ -2667,6 +2668,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 				if (done) break;
 				if (!value || value.byteLength === 0) continue;
 				hasData = true;
+				if (流量计数器) 流量计数器.下行 += value.byteLength;
 				if (value.byteLength >= 下行Grain包字节) {
 					await 下行发送器.flush();
 					await 下行发送器.直接发送(value);
@@ -6209,4 +6211,77 @@ async function html1101(host, 访问IP) {
   </script>
 </body>
 </html>`;
+}
+
+///////////////////////////////////////////////////////////////////////流量统计///////////////////////////////////////////////
+// 流量统计：通过 KV 持久化按 UUID 累计上行/下行字节，并提供最近会话记录。
+// 数据结构(KV: traffic.json):
+// {
+//   "total": { "上行": 0, "下行": 0 },
+//   "byUUID": { "<uuid>": { "上行": 0, "下行": 0 } },
+//   "recent": [ { "uuid", "上行", "下行", "duration", "起始", "结束", "colo", "asn" } ]  // 最近 100 条
+// }
+
+function 创建流量计数器(uuid, request = null) {
+	return {
+		uuid: String(uuid || 'unknown'),
+		上行: 0,
+		下行: 0,
+		起始时间: Date.now(),
+		colo: request?.cf?.colo || null,
+		asn: request?.cf?.asn ? `AS${request.cf.asn}` : null,
+	};
+}
+
+async function 累计流量到KV(env, 计数器) {
+	if (!env?.KV || typeof env.KV.put !== 'function') return;
+	if (!计数器) return;
+	const 上行 = Number(计数器.上行) || 0;
+	const 下行 = Number(计数器.下行) || 0;
+	if (上行 === 0 && 下行 === 0) return;
+	try {
+		const 现有 = await env.KV.get('traffic.json');
+		let data;
+		if (现有) {
+			try { data = JSON.parse(现有); }
+			catch (_) { data = { total: { 上行: 0, 下行: 0 }, byUUID: {}, recent: [] }; }
+		} else {
+			data = { total: { 上行: 0, 下行: 0 }, byUUID: {}, recent: [] };
+		}
+		if (!data.total) data.total = { 上行: 0, 下行: 0 };
+		if (!data.byUUID || typeof data.byUUID !== 'object') data.byUUID = {};
+		if (!Array.isArray(data.recent)) data.recent = [];
+
+		data.total.上行 = (Number(data.total.上行) || 0) + 上行;
+		data.total.下行 = (Number(data.total.下行) || 0) + 下行;
+
+		const u = data.byUUID[计数器.uuid] || { 上行: 0, 下行: 0 };
+		u.上行 = (Number(u.上行) || 0) + 上行;
+		u.下行 = (Number(u.下行) || 0) + 下行;
+		data.byUUID[计数器.uuid] = u;
+
+		const 结束时间 = Date.now();
+		data.recent.unshift({
+			uuid: 计数器.uuid,
+			上行, 下行,
+			duration: 结束时间 - 计数器.起始时间,
+			起始: 计数器.起始时间,
+			结束: 结束时间,
+			colo: 计数器.colo,
+			asn: 计数器.asn,
+		});
+		if (data.recent.length > 100) data.recent.length = 100;
+
+		await env.KV.put('traffic.json', JSON.stringify(data));
+	} catch (e) {
+		console.error(`流量统计写入失败: ${e?.message || e}`);
+	}
+}
+
+function 格式化字节数(bytes) {
+	bytes = Number(bytes) || 0;
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+	return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
